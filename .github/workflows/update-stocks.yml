@@ -1,0 +1,78 @@
+name: 更新A股股票池
+
+on:
+  schedule:
+    # 每月1号 UTC 00:00 运行（北京时间早上8点）
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+    # 允许手动触发
+
+jobs:
+  update-stocks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install requests akshare baostock pandas
+
+      - name: 运行股票池更新脚本
+        run: python scripts/update_stocks.py
+
+      - name: 生成交易日历
+        run: python scripts/generate_trading_calendar.py
+
+      - name: 检查是否有变更
+        id: check_changes
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "股票数据无变化，无需更新"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 创建 Pull Request
+        id: create-pr
+        if: steps.check_changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "chore: 更新A股股票池数据 (${{ github.run_date }})"
+          title: "📊 月度股票池更新 - ${{ github.run_date }}"
+          body: |
+            ## 自动更新摘要
+
+            本 PR 由 GitHub Action 自动生成，从东方财富公开 API 获取最新 A 股数据。
+
+            - **数据来源**: 东方财富公开 API
+            - **更新日期**: ${{ github.run_date }}
+            - **触发方式**: ${{ github.event_name }}
+
+            ### 更新内容
+            - 更新 `src/data/stocks_batch*.ts` 股票数据文件
+            - 更新 `src/data/stocks.ts` 中的股票总数和批次数
+
+            🤖 本 PR 将自动合并。
+          branch: auto/update-stocks
+          delete-branch: true
+          labels: automated,data-update
+
+      - name: 启用自动合并
+        if: steps.check_changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr_number="${{ steps.create-pr.outputs.pull-request-number }}"
+          echo "启用 PR #${pr_number} 自动合并..."
+          gh pr merge "${pr_number}" --merge --auto --delete-branch

@@ -1,6 +1,9 @@
 import { Link, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { useRef, useState, useLayoutEffect, useEffect } from 'react';
+import { useRef, useState, useLayoutEffect, useEffect, memo } from 'react';
+import tradingCalendar from '../data/trading_calendar.json';
+
+const tradingDaySet = new Set(tradingCalendar.tradingDays);
 
 export function Navigation() {
   const location = useLocation();
@@ -117,15 +120,36 @@ export function Navigation() {
           </div>
 
           {/* 日期显示 */}
-          <div className="text-xs sm:text-sm text-[#F5E6D3]/50 hidden md:block shrink-0 ml-auto">
-            {new Date().toLocaleDateString('zh-CN', {
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric'
-            })}
-          </div>
+          <TradingDate />
         </div>
       </div>
     </nav>
   );
 }
+
+// 顶栏日期 + 交易/休市状态
+const TradingDate = memo(function TradingDate() {
+  const todayStr = new Date().toISOString().split('T')[0];
+  const isTrading = tradingDaySet.has(todayStr);
+
+  const dateStr = new Date().toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+
+  return (
+    <div className="hidden md:flex items-center gap-2 shrink-0 ml-auto">
+      <span className="text-xs sm:text-sm text-[#F5E6D3]/50">{dateStr}</span>
+      <span
+        className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+          isTrading
+            ? 'text-red-400 bg-red-400/10 border border-red-400/30'
+            : 'text-green-400 bg-green-400/10 border border-green-400/30'
+        }`}
+      >
+        {isTrading ? '交易' : '休市'}
+      </span>
+    </div>
+  );
+});

@@ -1,8 +1,10 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AncientCard, AncientBadge, TrendIndicator, WuXingIcon } from '../components/ui/AncientUI';
 import { WUXING_SECTORS, WUXING_RELATIONS, TIANGAN_WUXING, DIZHI_WUXING } from '../utils/mappings';
 import { loadBatch, loadAllStocks, searchStocks, TOTAL_STOCK_COUNT, type StockData } from '../data/stocks';
+import { getLunarInfo } from '../utils/xuanxue';
+import { StockChart } from '../components/StockChart';
 import type { StockBaZi, WuXing } from '../types';
 
 const WUXING_COLOR_MAP: Record<WuXing, string> = {
@@ -13,6 +15,43 @@ const WUXING_CHINESE: Record<string, string> = {
   metal: '金', wood: '木', water: '水', fire: '火', earth: '土'
 };
 
+// 列表项用 memo 避免无效重渲染
+const StockListItem = memo(function StockListItem({
+  stock,
+  isSelected,
+  onSelect,
+}: {
+  stock: StockData;
+  isSelected: boolean;
+  onSelect: (s: StockData) => void;
+}) {
+  return (
+    <div
+      className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer transition-colors ${
+        isSelected
+          ? 'bg-[#C9A962]/10 border border-[#C9A962]/30'
+          : 'hover:bg-[#1A1A1A]'
+      }`}
+      onClick={() => onSelect(stock)}
+    >
+      <div
+        className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
+        style={{
+          backgroundColor: `${WUXING_COLOR_MAP[stock.wuxing]}20`,
+          color: WUXING_COLOR_MAP[stock.wuxing],
+        }}
+      >
+        {WUXING_CHINESE[stock.wuxing]}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm text-[#F5E6D3] truncate">{stock.name}</div>
+        <div className="text-xs text-[#F5E6D3]/40">{stock.code} · {stock.sector}</div>
+      </div>
+      <div className="text-xs text-[#F5E6D3]/30 shrink-0">{stock.listDate}</div>
+    </div>
+  );
+});
+
 export function StockPage() {
   const [query, setQuery] = useState('');
   const [selectedStock, setSelectedStock] = useState<StockData | null>(null);
@@ -21,11 +60,19 @@ export function StockPage() {
   const [visibleCount, setVisibleCount] = useState(50);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // 日期选择：默认今天，支持历史回看
+  const todayStr = new Date().toISOString().split('T')[0];
+  const [selectedDate, setSelectedDate] = useState(todayStr);
+  const selectedDateObj = useMemo(() => new Date(selectedDate + 'T12:00:00'), [selectedDate]);
+  const lunarInfo = useMemo(() => getLunarInfo(selectedDateObj), [selectedDateObj]);
+  const isToday = selectedDate === todayStr;
+
   // 分批加载的数据
   const [loadedStocks, setLoadedStocks] = useState<StockData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [analyzeFunc, setAnalyzeFunc] = useState<((s: StockData) => StockBaZi) | null>(null);
-  const [topStocks, setTopStocks] = useState<any[]>([]);
+  const [analyzeFunc, setAnalyzeFunc] = useState<((s: StockData, d?: Date) => StockBaZi) | null>(null);
+  const [topStocks, setTopStocks] = useState<{ code: string; name: string; wuxing: WuXing; listDate: string; todayCompatibility: number; todayTrend: string; todayAdvice: string }[]>([]);
+  const [dataFullyLoaded, setDataFullyLoaded] = useState(false);
 
   // 初始加载：只加载第一批（1000只，按代码排序）
   useEffect(() => {
@@ -42,21 +89,29 @@ export function StockPage() {
       setLoadedStocks(firstBatch);
       setIsLoading(false);
 
-      // 计算今日旺股（用第一批数据）
-      const tops = fortuneModule.getTodayTopStocks(firstBatch, new Date(), 5);
-      setTopStocks(tops);
-
       // 后台继续加载剩余批次
       for (let i = 1; i <= 5; i++) {
         const batch = await loadBatch(i);
         if (!mounted) return;
         setLoadedStocks(prev => [...prev, ...batch]);
       }
+      if (mounted) setDataFullyLoaded(true);
     }
 
     init();
     return () => { mounted = false; };
   }, []);
+
+  // 日期或数据完整加载后，用 requestIdleCallback 异步计算旺股
+  useEffect(() => {
+    if (!dataFullyLoaded) return;
+    const id = requestIdleCallback(() => {
+      import('../utils/stockFortune').then(m => {
+        setTopStocks(m.getTodayTopStocks(loadedStocks, selectedDateObj, 5));
+      });
+    });
+    return () => cancelIdleCallback(id);
+  }, [selectedDate, dataFullyLoaded]);
 
   // 搜索时确保加载全部数据
   useEffect(() => {
@@ -92,7 +147,7 @@ export function StockPage() {
   const handleSelectStock = (stock: StockData) => {
     if (!analyzeFunc) return;
     setSelectedStock(stock);
-    const result = analyzeFunc(stock);
+    const result = analyzeFunc(stock, selectedDateObj);
     setAnalysis(result);
   };
 
@@ -109,6 +164,60 @@ export function StockPage() {
           <p className="text-sm sm:text-base text-[#F5E6D3]/60">
             以上市日期为生辰，推演个股命理
           </p>
+
+          {/* 日期选择器 + 农历信息 */}
+          <AncientCard className="!p-4 mt-4 max-w-md mx-auto">
+            <div className="flex items-center gap-3 mb-3">
+              <label className="text-xs text-[#F5E6D3]/50 shrink-0">选择日期</label>
+              <div className="relative flex-1">
+                <input
+                  type="date"
+                  value={selectedDate}
+                  onChange={(e) => {
+                    setSelectedDate(e.target.value);
+                    // 重新分析当前选中股票
+                    if (selectedStock && analyzeFunc) {
+                      setAnalysis(analyzeFunc(selectedStock, new Date(e.target.value + 'T12:00:00')));
+                    }
+                  }}
+                  max={todayStr}
+                  className="w-full bg-[#1A1A1A] border border-[#C9A962]/30 rounded-lg px-3 py-2 text-[#F5E6D3] text-sm focus:outline-none focus:border-[#C9A962]/60 [color-scheme:dark]"
+                />
+              </div>
+              {!isToday && (
+                <button
+                  onClick={() => {
+                    setSelectedDate(todayStr);
+                    if (selectedStock && analyzeFunc) {
+                      setAnalysis(analyzeFunc(selectedStock, new Date()));
+                    }
+                  }}
+                  className="text-xs text-[#C9A962] hover:text-[#FFD700] transition-colors shrink-0"
+                >
+                  回到今天
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center text-xs">
+              <div className="bg-[#1A1A1A] rounded px-2 py-1.5">
+                <span className="text-[#F5E6D3]/40">农历 </span>
+                <span className="text-[#C9A962]">{lunarInfo.lunarMonth}{lunarInfo.lunarDay}</span>
+              </div>
+              <div className="bg-[#1A1A1A] rounded px-2 py-1.5">
+                <span className="text-[#F5E6D3]/40">干支 </span>
+                <span className="text-[#C9A962]">{lunarInfo.dayGanZhi}日</span>
+              </div>
+              <div className="bg-[#1A1A1A] rounded px-2 py-1.5">
+                <span className="text-[#F5E6D3]/40">建除 </span>
+                <span className={`font-bold ${lunarInfo.jianChu === '建' || lunarInfo.jianChu === '开' || lunarInfo.jianChu === '成' ? 'text-red-400' : lunarInfo.jianChu === '破' || lunarInfo.jianChu === '危' || lunarInfo.jianChu === '闭' ? 'text-gray-500' : 'text-[#C9A962]'}`}>
+                  {lunarInfo.jianChu}
+                </span>
+              </div>
+            </div>
+            <div className="mt-2 text-center text-xs text-[#F5E6D3]/40">
+              {lunarInfo.xiuAnimal} · {lunarInfo.xingXiu} · {lunarInfo.dayNineStar.number}星{['','白','黑','碧','绿','黄','白','赤','白','紫'][parseInt(lunarInfo.dayNineStar.number)||0] || ''}
+            </div>
+          </AncientCard>
         </div>
 
         <div className="grid lg:grid-cols-5 gap-6">
@@ -165,12 +274,12 @@ export function StockPage() {
               </AncientCard>
             ) : (
             <>
-            {/* 今日旺股 */}
+            {/* 指定日旺股 */}
             {!query && filterWuxing === 'all' && topStocks.length > 0 && (
               <AncientCard className="!p-4">
                 <h3 className="text-sm font-bold text-[#C9A962] mb-3 flex items-center gap-2">
                   <span className="text-red-400">&#9733;</span>
-                  今日旺股
+                  {isToday ? '今日旺股' : `${selectedDate} 旺股`}
                 </h3>
                 <div className="space-y-2">
                   {topStocks.map((s, i) => (
@@ -211,30 +320,12 @@ export function StockPage() {
                 className="space-y-1 max-h-[300px] sm:max-h-[500px] overflow-y-auto pr-1"
               >
                 {filteredStocks.slice(0, visibleCount).map(stock => (
-                  <div
+                  <StockListItem
                     key={stock.code}
-                    className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer transition-colors ${
-                      selectedStock?.code === stock.code
-                        ? 'bg-[#C9A962]/10 border border-[#C9A962]/30'
-                        : 'hover:bg-[#1A1A1A]'
-                    }`}
-                    onClick={() => handleSelectStock(stock)}
-                  >
-                    <div
-                      className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
-                      style={{
-                        backgroundColor: `${WUXING_COLOR_MAP[stock.wuxing]}20`,
-                        color: WUXING_COLOR_MAP[stock.wuxing],
-                      }}
-                    >
-                      {WUXING_CHINESE[stock.wuxing]}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm text-[#F5E6D3] truncate">{stock.name}</div>
-                      <div className="text-xs text-[#F5E6D3]/40">{stock.code} · {stock.sector}</div>
-                    </div>
-                    <div className="text-xs text-[#F5E6D3]/30 shrink-0">{stock.listDate}</div>
-                  </div>
+                    stock={stock}
+                    isSelected={selectedStock?.code === stock.code}
+                    onSelect={handleSelectStock}
+                  />
                 ))}
               </div>
             </AncientCard>
@@ -253,6 +344,9 @@ export function StockPage() {
                   exit={{ opacity: 0, x: -20 }}
                   className="space-y-4"
                 >
+                  {/* K线图 */}
+                  <StockChart code={selectedStock.code} name={selectedStock.name} />
+
                   {/* 股票命盘 */}
                   <AncientCard glowing>
                     <div className="flex items-start justify-between mb-4">
@@ -275,7 +369,7 @@ export function StockPage() {
                         }}>
                           {analysis.todayCompatibility}
                         </div>
-                        <div className="text-xs text-[#F5E6D3]/50">今日运势</div>
+                        <div className="text-xs text-[#F5E6D3]/50">{isToday ? '今日运势' : selectedDate + ' 运势'}</div>
                       </div>
                     </div>
 
@@ -397,7 +491,9 @@ export function StockPage() {
 
                   {/* 今日运势详解 */}
                   <AncientCard>
-                    <h3 className="text-base font-bold text-[#C9A962] mb-4">今日运势详解</h3>
+                    <h3 className="text-base font-bold text-[#C9A962] mb-4">
+                    {isToday ? '今日运势详解' : selectedDate + ' 运势详解'}
+                  </h3>
                     <div className="flex items-center gap-4 mb-4">
                       <TrendIndicator trend={analysis.todayTrend} strength={
                         analysis.todayCompatibility >= 70 ? 5 :

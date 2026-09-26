@@ -115,7 +115,7 @@ function calcTodayCompatibility(
   // 今日生股票 = 利好（印星临）
   if (relations.generates[todayDayWuxing] === stockDayMasterWuxing) {
     score += 20;
-    adviceParts.push('今日天干生助命主，如得贵人相助');
+    adviceParts.push('该日天干生助命主，如得贵人相助');
   }
   // 股票生今日 = 泄气
   if (relations.generates[stockDayMasterWuxing] === todayDayWuxing) {
@@ -125,17 +125,17 @@ function calcTodayCompatibility(
   // 今日克股票 = 官星临，压力
   if (relations.overcomes[todayDayWuxing] === stockDayMasterWuxing) {
     score -= 15;
-    adviceParts.push('今日天干克制命主，承受压力');
+    adviceParts.push('该日天干克制命主，承受压力');
   }
   // 股票克今日 = 财星动，利好
   if (relations.overcomes[stockDayMasterWuxing] === todayDayWuxing) {
     score += 15;
-    adviceParts.push('命主克制今日天干，财星有动');
+    adviceParts.push('命主克制该日天干，财星有动');
   }
   // 同五行 = 比肩/劫财
   if (todayDayWuxing === stockDayMasterWuxing) {
     score += 5;
-    adviceParts.push('今日与命主同气相求，得比肩之助');
+    adviceParts.push('该日与命主同气相求，得比肩之助');
   }
 
   // 建除影响
@@ -169,7 +169,7 @@ function calcTodayCompatibility(
 
   const advice = adviceParts.length > 0
     ? adviceParts.join('；') + '。'
-    : `今日${wuxingChinese[stockDayMasterWuxing]}行之股运势平稳。`;
+    : `${wuxingChinese[stockDayMasterWuxing]}行之股运势平稳。`;
 
   return { score, trend, advice };
 }
@@ -255,42 +255,96 @@ export function analyzeStockFortune(stock: StockData, todayDate: Date = new Date
   };
 }
 
-// 获取今日最旺股票排行
+// 获取指定日最旺股票排行（轻量版：使用板块五行，无需完整八字分析）
 export function getTodayTopStocks(
   stocks: StockData[],
   todayDate: Date = new Date(),
   limit = 10
-): StockBaZi[] {
-  const analyzed = stocks.map(s => analyzeStockFortune(s, todayDate));
-  analyzed.sort((a, b) => b.todayCompatibility - a.todayCompatibility);
-  return analyzed.slice(0, limit);
+): { code: string; name: string; wuxing: WuXing; listDate: string; todayCompatibility: number; todayTrend: 'up' | 'down' | 'stable'; todayAdvice: string }[] {
+  const todayInfo = getLunarInfo(todayDate);
+  const todayDayGan = todayInfo.dayGanZhi[0];
+  const todayDayWuxing = TIANGAN_WUXING[todayDayGan];
+
+  if (!todayDayWuxing) {
+    return stocks.slice(0, limit).map(s => ({
+      code: s.code, name: s.name, wuxing: s.wuxing, listDate: s.listDate,
+      todayCompatibility: 50, todayTrend: 'stable' as const, todayAdvice: '运势平稳',
+    }));
+  }
+
+  // 日期公共因素（所有股票相同，只算一次）
+  let dateScore = 0;
+  const jianChu = todayInfo.jianChu;
+  if (['建', '开', '成'].includes(jianChu)) dateScore += 10;
+  if (['破', '危', '闭'].includes(jianChu)) dateScore -= 10;
+  if (todayInfo.xiuLuck === '吉') dateScore += 5;
+  if (todayInfo.xiuLuck === '凶') dateScore -= 5;
+  const nineStarIdx = todayInfo.dayNineStar.index + 1;
+  if ([1, 6, 8].includes(nineStarIdx)) dateScore += 8;
+  if ([2, 5, 7].includes(nineStarIdx)) dateScore -= 8;
+  if (todayInfo.dayTianShenLuck === '吉') dateScore += 5;
+  if (todayInfo.dayTianShenLuck === '凶') dateScore -= 5;
+
+  // 只用板块五行比对天干五行，跳过完整的八字排盘
+  const results = stocks.map(s => {
+    let score = 50 + dateScore;
+
+    if (WUXING_RELATIONS.generates[todayDayWuxing] === s.wuxing) score += 20;
+    else if (WUXING_RELATIONS.generates[s.wuxing] === todayDayWuxing) score -= 10;
+    else if (WUXING_RELATIONS.overcomes[todayDayWuxing] === s.wuxing) score -= 15;
+    else if (WUXING_RELATIONS.overcomes[s.wuxing] === todayDayWuxing) score += 15;
+    else if (todayDayWuxing === s.wuxing) score += 5;
+
+    score = Math.max(5, Math.min(95, score));
+    const trend: 'up' | 'down' | 'stable' = score >= 60 ? 'up' : score <= 40 ? 'down' : 'stable';
+
+    const wuxingLabel = { metal: '金', wood: '木', water: '水', fire: '火', earth: '土' }[s.wuxing] || '';
+    const advice = `${wuxingLabel}行之股`;
+    const adviceFull = score >= 60 ? `${advice}气运亨通` : score <= 40 ? `${advice}气运低迷` : `${advice}运势平稳`;
+
+    return {
+      code: s.code,
+      name: s.name,
+      wuxing: s.wuxing,
+      listDate: s.listDate,
+      todayCompatibility: score,
+      todayTrend: trend,
+      todayAdvice: adviceFull,
+    };
+  });
+
+  results.sort((a, b) => b.todayCompatibility - a.todayCompatibility);
+  return results.slice(0, limit);
 }
 
-// 获取股票的详细今日运势解读
-export function getStockDailyReading(stock: StockData, todayDate: Date = new Date()): string {
-  const bazi = analyzeStockFortune(stock, todayDate);
-  const todayInfo = getLunarInfo(todayDate);
+// 获取股票的指定日运势解读
+export function getStockDailyReading(stock: StockData, targetDate: Date = new Date()): string {
+  const bazi = analyzeStockFortune(stock, targetDate);
+  const dateInfo = getLunarInfo(targetDate);
   const wuxingChinese: Record<WuXing, string> = {
     metal: '金', wood: '木', water: '水', fire: '火', earth: '土'
   };
 
+  const isToday = targetDate.toDateString() === new Date().toDateString();
+  const dateLabel = isToday ? '今日' : targetDate.toISOString().split('T')[0];
+
   const parts: string[] = [];
 
-  parts.push(`【${stock.name}（${stock.code}）今日运势】`);
+  parts.push(`【${stock.name}（${stock.code}）${dateLabel}运势】`);
   parts.push(`此股诞于${stock.listDate}，命主${TIANGAN_NAMES[bazi.dayMaster] || bazi.dayMaster}，${bazi.dayMasterYinYang}${wuxingChinese[bazi.dayMasterWuxing]}命。`);
   parts.push(`日柱纳音「${bazi.dayNaYin}」。`);
   parts.push(`财星属${wuxingChinese[bazi.caiXing]}，官星属${wuxingChinese[bazi.guanXing]}。`);
   parts.push('');
-  parts.push(`今日${todayInfo.dayGanZhi}日，${todayInfo.jianChu}日值班。`);
+  parts.push(`${dateLabel}${dateInfo.dayGanZhi}日，${dateInfo.jianChu}日值班。`);
   parts.push(bazi.todayAdvice);
   parts.push('');
 
   if (bazi.todayCompatibility >= 70) {
-    parts.push('综合判断：今日此股气运亨通，宜积极关注。');
+    parts.push(`综合判断：${dateLabel}此股气运亨通，宜积极关注。`);
   } else if (bazi.todayCompatibility >= 50) {
-    parts.push('综合判断：今日此股运势平稳，可伺机而动。');
+    parts.push(`综合判断：${dateLabel}此股运势平稳，可伺机而动。`);
   } else {
-    parts.push('综合判断：今日此股气运低迷，宜观望等待。');
+    parts.push(`综合判断：${dateLabel}此股气运低迷，宜观望等待。`);
   }
 
   // 关联板块分析
